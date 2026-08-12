@@ -1,0 +1,12 @@
+build/
+*.wav
+*.o
+*.pyc
+__pycache__/
+src/moc_*.cpp
+src/*_test.cpp
+src/backend_test.cpp
+src/places_test.cpp
+src/sinustest.cpp
+src/sidplayer_kern.cpp
+start.sh
