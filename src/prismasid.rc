@@ -1,0 +1,28 @@
+// Windows-Resource für PrismaSID — bettet das Icon in die exe ein
+// (ohne das zeigt Windows das Standard-Binary-Icon im Desktop/Explorer)
+#include <windows.h>
+
+IDI_ICON1 ICON DISCARDABLE "assets/sidplayer.ico"
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "040904b0"
+        {
+            VALUE "CompanyName", "Nika & Mike"
+            VALUE "FileDescription", "PrismaSID - Modern C64 SID-Player"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "ProductName", "PrismaSID"
+            VALUE "ProductVersion", "1.0.0"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x0409, 1200
+    }
+}

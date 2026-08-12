@@ -10,12 +10,23 @@
 #include <QQmlContext>
 #include <QUrl>
 #include <QFileInfo>
+#include <QDir>
 
 #include "sidplayer_backend.h"
 #include "waveform_item.h"
 
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
+
+    // WICHTIG (Windows): QML-Module liegen relativ zum Binary (qml/ neben der exe).
+    // Ohne QML2_IMPORT_PATH findet die App QtQuick.Controls/Layouts/Dialogs nicht
+    // und das Setup scheint "tot" (Fenster öffnet nie).
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString qmlImportDir = appDir + "/qml";
+    if (QDir(qmlImportDir).exists()) {
+        const QString existing = qgetenv("QML2_IMPORT_PATH");
+        qputenv("QML2_IMPORT_PATH", (qmlImportDir + (existing.isEmpty() ? "" : ";" + existing)).toUtf8());
+    }
 
     qmlRegisterType<WaveformItem>("SidPlayer", 1, 0, "WaveformItem");
 
@@ -35,6 +46,7 @@ int main(int argc, char* argv[]) {
     const QStringList candidates = {
         QFileInfo(QCoreApplication::applicationDirPath() + "/../qml/main.qml").absoluteFilePath(),
         QFileInfo(QCoreApplication::applicationDirPath() + "/qml/main.qml").absoluteFilePath(),
+        QFileInfo(QCoreApplication::applicationDirPath() + "/main.qml").absoluteFilePath(),  // Install-Root-Fallback
         QFileInfo(QCoreApplication::applicationDirPath() + "/../share/prismasid/qml/main.qml").absoluteFilePath(),  // AppImage-Layout
         QFileInfo("qml/main.qml").absoluteFilePath(),
         QFileInfo("main.qml").absoluteFilePath(),
