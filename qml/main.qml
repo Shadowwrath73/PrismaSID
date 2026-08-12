@@ -28,7 +28,7 @@ ApplicationWindow {
     // ── Wellenform-Daten ──
     property var waveSamples: []
     onWaveSamplesChanged: {
-        if (waveCanvas) waveCanvas.requestPaint()
+        // waveCanvas (C++ WaveformItem) zeichnet sich selbst bei setSamples — kein requestPaint nötig
     }
 
     // Orte-Liste für den Browser (JS-Kopie vom Backend — robust gegen Signal-Timing)
@@ -411,6 +411,61 @@ ApplicationWindow {
                 }
             }
 
+            // ── Effekt-Panel (ausklappbar, dezent) ──
+            Rectangle {
+                id: fxPanel
+                visible: false
+                Layout.fillWidth: true
+                Layout.preferredHeight: 46
+                radius: 12
+                color: Qt.rgba(0.07, 0.10, 0.17, 0.85)
+                border.color: glassBorder
+                border.width: 1
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 12
+
+                    Text { text: "🎛"; font.pixelSize: 14 }
+
+                    Text { text: "Reverb"; font.pixelSize: 11; color: textDim }
+                    Slider {
+                        id: reverbSlider
+                        from: 0; to: 1; stepSize: 0.01
+                        Layout.preferredWidth: 120
+                        value: sidBackend.fxReverb
+                        onMoved: sidBackend.fxReverb = value
+                    }
+
+                    Text { text: "Echo"; font.pixelSize: 11; color: textDim }
+                    Slider {
+                        id: echoSlider
+                        from: 0; to: 1; stepSize: 0.01
+                        Layout.preferredWidth: 120
+                        value: sidBackend.fxEcho
+                        onMoved: sidBackend.fxEcho = value
+                    }
+
+                    Text { text: "Spatial"; font.pixelSize: 11; color: textDim }
+                    Slider {
+                        id: spatialSlider
+                        from: 0; to: 1; stepSize: 0.01
+                        Layout.preferredWidth: 120
+                        value: sidBackend.fxSpatial
+                        onMoved: sidBackend.fxSpatial = value
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Text {
+                        text: "100% pur ohne Effekte — Regler nach rechts = mehr"
+                        font.pixelSize: 9
+                        color: textDim
+                    }
+                }
+            }
+
             // Steuerleiste (direkt unter Song-Info — kein Leerraum mehr)
             RowLayout {
                 Layout.fillWidth: true
@@ -510,6 +565,55 @@ ApplicationWindow {
                 }
 
                 Item { Layout.fillWidth: true }
+
+                // ── WAV-Export-Button ──
+                Rectangle {
+                    id: exportBtn
+                    width: exportLabel.width + 34
+                    height: 42
+                    radius: 12
+                    color: Qt.rgba(1,1,1,0.05)
+                    border.color: glassBorder
+                    border.width: 1
+                    Text {
+                        id: exportLabel
+                        anchors.centerIn: parent
+                        text: "💾 WAV"
+                        font.pixelSize: 12
+                        color: textMain
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (sidBackend.filePath.length === 0) return
+                            exportDialog.open()
+                        }
+                    }
+                }
+
+                // ── Effekt-Button + Panel (Reverb/Echo/Spatial) ──
+                Rectangle {
+                    id: fxBtn
+                    width: fxLabel.width + 34
+                    height: 42
+                    radius: 12
+                    color: fxPanel.visible ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
+                    border.color: fxPanel.visible ? accent : glassBorder
+                    border.width: 1
+                    Text {
+                        id: fxLabel
+                        anchors.centerIn: parent
+                        text: "🎛 Effekte"
+                        font.pixelSize: 12
+                        color: fxPanel.visible ? accent : textMain
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: fxPanel.visible = !fxPanel.visible
+                    }
+                }
 
                 Text {
                     text: sidBackend.filePath.length > 0 ? sidBackend.filePath : ""
@@ -721,7 +825,11 @@ ApplicationWindow {
         height: 560
         color: "#0a0e18"
         title: "PrismaSID — Datei-Browser"
-        flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
+        // Volle native Fenster-Flags — unter Windows gibt es sonst KEINEN Schließen-Button
+        // (Qt rendert bei unvollständigen Flags eine eigene Titelleiste ohne Close)
+        flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+             | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
+             | Qt.WindowCloseButtonHint
 
         // Modus: "open" = abspielen, "add" = zur Playlist
         property string mode: "open"
@@ -1132,5 +1240,65 @@ ApplicationWindow {
         title: "Zur Playlist hinzufügen"
         nameFilters: ["SID-Dateien (*.sid *.mus)", "Alle Dateien (*)"]
         onAccepted: sidBackend.addToPlaylist(selectedFile)
+    }
+
+    // ── WAV-Export-Dialog ──
+    FileDialog {
+        id: exportDialog
+        title: "WAV exportieren"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "wav"
+        nameFilters: ["WAV-Dateien (*.wav)"]
+        onAccepted: sidBackend.exportWav(selectedFile.toString().replace("file://", ""))
+    }
+
+    // ── Export-Fortschritt (Toast unten rechts) ──
+    Connections {
+        target: sidBackend
+        function onExportProgress(current, total) {
+            exportToast.text = "💾 Exportiere Subsong " + current + "/" + total + " …"
+            exportToast.visible = true
+            exportTimer.restart()
+        }
+        function onExportFinished(success, filePath) {
+            if (success) {
+                exportToast.text = "✅ WAV fertig: " + filePath
+            } else {
+                exportToast.text = "❌ Export fehlgeschlagen"
+            }
+            exportToast.visible = true
+            exportTimer.restart()
+        }
+    }
+
+    Timer {
+        id: exportTimer
+        interval: 5000
+        onTriggered: exportToast.visible = false
+    }
+
+    Rectangle {
+        id: exportToast
+        visible: false
+        z: 100
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 20
+        width: Math.max(320, exportToastText.width + 40)
+        height: 44
+        radius: 12
+        color: Qt.rgba(0.10, 0.14, 0.24, 0.95)
+        border.color: accent
+        border.width: 1
+        property string text: ""
+        Text {
+            id: exportToastText
+            anchors.centerIn: parent
+            text: exportToast.text
+            font.pixelSize: 12
+            color: textMain
+            elide: Text.ElideRight
+            width: parent.width - 30
+        }
     }
 }

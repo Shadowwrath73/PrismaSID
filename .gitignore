@@ -1,4 +1,6 @@
 build/
+build_*/
+build_release/
 *.wav
 *.o
 *.pyc
@@ -9,4 +11,5 @@ src/backend_test.cpp
 src/places_test.cpp
 src/sinustest.cpp
 src/sidplayer_kern.cpp
+src/backend_smb_test.cpp
 start.sh

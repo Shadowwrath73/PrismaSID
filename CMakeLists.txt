@@ -39,11 +39,15 @@ if(WIN32)
     endif()
 endif()
 
+if(WIN32)
+    set(PRISMASID_RES ${CMAKE_CURRENT_BINARY_DIR}/prismasid_res.o)
+endif()
+
 add_executable(prismasid
     src/main.cpp
     src/sidplayer_backend.h
     src/waveform_item.h
-    ${CMAKE_CURRENT_BINARY_DIR}/prismasid_res.o
+    ${PRISMASID_RES}
 )
 
 target_link_libraries(prismasid PRIVATE

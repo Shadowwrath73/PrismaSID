@@ -13,6 +13,8 @@
 #include <QAudioFormat>
 #include <QTimer>
 #include <QVector>
+#include <QFile>
+#include <QUrl>
 #include <QByteArray>
 #include <QStringList>
 #include <QDir>
@@ -20,6 +22,7 @@
 #include <QFileInfo>
 #include <QColor>
 #include <QFile>
+#include <QUrl>
 #include <QRegularExpression>
 #include <QProcess>
 #include <QtConcurrent>
@@ -32,6 +35,7 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 #include <sidplayfp/SidTune.h>
 #include <sidplayfp/SidTuneInfo.h>
@@ -88,6 +92,84 @@ public:
     // Wellenform-Callback (lock-frei, nur memcpy)
     std::function<void(const float*, int)> onWaveform;
 
+    // ── DSP-Effekte (Reverb/Echo/Spatial) — nach dem mix(), vor dem Ring ──
+    // Parameter (0.0–1.0): werden vom Backend gesetzt, vom Render-Thread gelesen
+    std::atomic<float> fxReverb{0.0f};   // Feedback-Reverb-Menge
+    std::atomic<float> fxEcho{0.0f};     // Echo/Delay-Menge
+    std::atomic<float> fxSpatial{0.0f};  // Stereo-Widening (Haas)
+
+    // Delay-Puffer (Echo + Reverb-Feedback), 1.5s @48kHz, 2 Kanäle
+    std::vector<float> m_fxDelayL = std::vector<float>(72000, 0.0f);  // 1.5s
+    std::vector<float> m_fxDelayR = std::vector<float>(72000, 0.0f);
+    int m_fxPos = 0;
+
+    // Spatial-Delay (Haas): 12ms Versatz, 2 Kanäle
+    std::vector<float> m_haasL = std::vector<float>(576, 0.0f);  // 12ms
+    std::vector<float> m_haasR = std::vector<float>(576, 0.0f);
+    int m_haasPos = 0;
+
+    // Effekt-Parameter setzen (thread-safe via atomics)
+    void setEffects(float reverb, float echo, float spatial) {
+        fxReverb.store(qBound(0.0f, reverb, 1.0f));
+        fxEcho.store(qBound(0.0f, echo, 1.0f));
+        fxSpatial.store(qBound(0.0f, spatial, 1.0f));
+    }
+
+    // DSP-Verarbeitung eines Sample-Paars (L, R in-place)
+    void applyFx(float& l, float& r) {
+        const float reverb = fxReverb.load();
+        const float echo = fxEcho.load();
+        const float spatial = fxSpatial.load();
+        if (reverb < 0.001f && echo < 0.001f && spatial < 0.001f) return;
+
+        // Delay-Lese (Echo + Reverb-Feedback) — 300ms Echo, 200ms Reverb-Feedback
+        const int echoDelay = 48000 * 3 / 10;       // 300ms
+        const int reverbDelay = 48000 * 2 / 10;     // 200ms
+        int eIdx = m_fxPos - echoDelay;
+        if (eIdx < 0) eIdx += 72000;
+        float eL = m_fxDelayL[eIdx];
+        float eR = m_fxDelayR[eIdx];
+        int rIdx = m_fxPos - reverbDelay;
+        if (rIdx < 0) rIdx += 72000;
+        float fbL = m_fxDelayL[rIdx];
+        float fbR = m_fxDelayR[rIdx];
+
+        // Echo: Eingang + Feedback (Dämpfung 0.35)
+        float outL = l + echo * (eL + 0.35f * fbL);
+        float outR = r + echo * (eR + 0.35f * fbR);
+
+        // Reverb: Feedback-Delay mit Dämpfung, auf das Signal mischen
+        if (reverb > 0.001f) {
+            outL += reverb * (0.55f * fbL);
+            outR += reverb * (0.55f * fbR);
+        }
+
+        // In Delay-Puffer schreiben (mit Reverb-Feedback)
+        m_fxDelayL[m_fxPos] = l + 0.5f * reverb * fbL;
+        m_fxDelayR[m_fxPos] = r + 0.5f * reverb * fbR;
+        m_fxPos = (m_fxPos + 1) % 72000;
+
+        // Spatial (Haas): 12ms Verzögerung, leichtes Cross-Mix → breiter
+        if (spatial > 0.001f) {
+            float hL = m_haasL[m_haasPos];
+            float hR = m_haasR[m_haasPos];
+            m_haasL[m_haasPos] = outL;
+            m_haasR[m_haasPos] = outR;
+            m_haasPos = (m_haasPos + 1) % 576;
+            // Original + verzögertes Gegen-Kanal-Signal (Haas-Effekt)
+            outL = outL + spatial * 0.5f * hR;
+            outR = outR + spatial * 0.5f * hL;
+        }
+
+        // Sanfte Begrenzung (kein Clipping-Kratzen)
+        const float lim = 1.0f;
+        outL = qBound(-lim, outL, lim);
+        outR = qBound(-lim, outR, lim);
+
+        l = outL;
+        r = outR;
+    }
+
     // ── Render-Thread: rendert SID-Samples NACH, wenn die Reserve sinkt ──
     void renderLoop() {
         while (m_renderRunning) {
@@ -110,6 +192,26 @@ public:
             if (produced <= 0) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
             unsigned int mixed = m_player.mix(m_renderBuf.data(), (unsigned int)produced);
             if (mixed == 0) break;
+
+            // DSP-Effekte auf die Samples anwenden (L/R-Paare)
+            const bool stereo = m_stereoMode && m_outCh >= 2;
+            if (stereo) {
+                for (unsigned int i = 0; i + 1 < mixed; i += 2) {
+                    float l = static_cast<float>(m_renderBuf[i]) / 32768.0f;
+                    float r = static_cast<float>(m_renderBuf[i+1]) / 32768.0f;
+                    applyFx(l, r);
+                    m_renderBuf[i] = static_cast<short>(qBound(-32768.0f, l * 32768.0f, 32767.0f));
+                    m_renderBuf[i+1] = static_cast<short>(qBound(-32768.0f, r * 32768.0f, 32767.0f));
+                }
+            } else {
+                // Mono: Effekt auf beide (identische) Samples
+                for (unsigned int i = 0; i < mixed; ++i) {
+                    float s = static_cast<float>(m_renderBuf[i]) / 32768.0f;
+                    float l = s, r = s;
+                    applyFx(l, r);
+                    m_renderBuf[i] = static_cast<short>(qBound(-32768.0f, ((l + r) * 0.5f) * 32768.0f, 32767.0f));
+                }
+            }
 
             // In Ringpuffer schreiben
             for (unsigned int i = 0; i < mixed; ++i) {
@@ -250,6 +352,10 @@ class SIDPlayerBackend : public QObject {
     Q_PROPERTY(QVariantList places READ places NOTIFY placesChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool coverMode READ coverMode WRITE setCoverMode NOTIFY coverModeChanged)
+    // DSP-Effekte (0.0–1.0)
+    Q_PROPERTY(float fxReverb READ fxReverb WRITE setFxReverb NOTIFY fxChanged)
+    Q_PROPERTY(float fxEcho READ fxEcho WRITE setFxEcho NOTIFY fxChanged)
+    Q_PROPERTY(float fxSpatial READ fxSpatial WRITE setFxSpatial NOTIFY fxChanged)
 
 public:
     explicit SIDPlayerBackend(QObject* parent = nullptr)
@@ -410,6 +516,23 @@ public:
     }
 
     // ── smb://-Ort öffnen über KIO — ASYNCHRON im Worker-Thread (UI bleibt flüssig) ──
+    float fxReverb() const { return m_fxReverb; }
+    void setFxReverb(float v) { setFx(m_fxReverb, qBound(0.0f, v, 1.0f)); }
+    float fxEcho() const { return m_fxEcho; }
+    void setFxEcho(float v) { setFx(m_fxEcho, qBound(0.0f, v, 1.0f)); }
+    float fxSpatial() const { return m_fxSpatial; }
+    void setFxSpatial(float v) { setFx(m_fxSpatial, qBound(0.0f, v, 1.0f)); }
+
+private:
+    void setFx(float& member, float v) {
+        if (qFuzzyCompare(member, v)) return;
+        member = v;
+        if (m_audioSource) m_audioSource->setEffects(m_fxReverb, m_fxEcho, m_fxSpatial);
+        emit fxChanged();
+    }
+
+public:
+    // WICHTIG: Q_INVOKABLE! Ohne das kann QML openPlace nicht aufrufen (TypeError)
     Q_INVOKABLE void openPlace(const QString& path) {
         if (path.startsWith("smb://")) {
             m_currentDir = path;
@@ -873,6 +996,196 @@ public:
         emit playingChanged();
     }
 
+    // ── WAV-Export: rendert alle Subsongs (je 3 Min) offline in eine WAV-Datei ──
+    // Asynchron (QtConcurrent) — UI bleibt flüssig, Fortschritt via exportProgress
+    Q_INVOKABLE void exportWav(const QString& path) {
+        if (m_tune == nullptr || path.isEmpty()) return;
+        // QML-FileDialog liefert ggf. eine file://-URL — robust in lokalen Pfad wandeln
+        QString target = path;
+        if (target.startsWith("file://")) target = QUrl(target).toLocalFile();
+        if (target.isEmpty()) return;
+        stop();
+
+        const SidTuneInfo* info = m_tune->getInfo();
+        const int totalSubs = qMax(1, static_cast<int>(info->songs()));
+        const int currentSong = m_currentSubsong;  // merken für Wiederherstellung
+        const int sidChips = static_cast<int>(info->sidChips());
+
+        // Effekt-Parameter für den Export (gleiche Stufe wie Live!)
+        const float fxR = m_fxReverb, fxE = m_fxEcho, fxS = m_fxSpatial;
+        const bool stereo = m_stereoMode && sidChips >= 2;
+
+        emit infoMessage("WAV-Export läuft…");
+
+        QtConcurrent::run([this, target, totalSubs, currentSong, sidChips, fxR, fxE, fxS, stereo]() {
+            constexpr int SAMPLE_RATE = 48000;
+            constexpr int DURATION_SEC = 180;  // 3 Min pro Subsong
+            constexpr int BLOCK = 8192;        // Samples pro Render-Schritt
+
+            // Eigene Player-Instanz für den Export (greift die Live-Wiedergabe nicht an)
+            ReSIDfpBuilder* builder = new ReSIDfpBuilder("export");
+            sidplayfp* player = new sidplayfp();
+            SidConfig config;
+            config.sidEmulation = builder;
+            config.defaultC64Model = SidConfig::PAL;
+            config.forceC64Model = true;
+            config.defaultSidModel = (m_chipModel == "MOS8580") ? SidConfig::MOS8580 : SidConfig::MOS6581;
+            config.forceSidModel = false;
+            config.frequency = SAMPLE_RATE;
+            config.samplingMethod = SidConfig::RESAMPLE_INTERPOLATE;
+            if (sidChips >= 2) config.secondSidAddress = 0xD420;
+            if (sidChips >= 3) config.thirdSidAddress = 0xD440;
+
+            QFile out(target);
+            const bool ok = out.open(QIODevice::WriteOnly);
+            if (!ok || !player->config(config) || !player->load(m_tune)) {
+                emit errorOccurred(QString::fromUtf8(player ? player->error() : "Datei konnte nicht geöffnet werden"));
+                delete player; delete builder;
+                emit exportFinished(false, target);
+                return;
+            }
+            // WICHTIG: initMixer NACH config/load (vorher → SIGILL in libsidplayfp!)
+            player->initMixer(stereo);
+
+            // WAV-Header (44 Bytes, wird am Ende mit Größe gefüllt)
+            auto writeWavHeader = [&](quint32 dataSize) {
+                out.seek(0);
+                QByteArray h(44, 0);
+                h[0]='R'; h[1]='I'; h[2]='F'; h[3]='F';
+                qToLittleEndian<quint32>(36 + dataSize, reinterpret_cast<uchar*>(h.data()+4));
+                h[8]='W'; h[9]='A'; h[10]='V'; h[11]='E';
+                h[12]='f'; h[13]='m'; h[14]='t'; h[15]=' ';
+                qToLittleEndian<quint32>(16, reinterpret_cast<uchar*>(h.data()+16));  // fmt-chunk
+                qToLittleEndian<quint16>(1, reinterpret_cast<uchar*>(h.data()+20));  // PCM
+                qToLittleEndian<quint16>(2, reinterpret_cast<uchar*>(h.data()+22));  // Kanäle
+                qToLittleEndian<quint32>(SAMPLE_RATE, reinterpret_cast<uchar*>(h.data()+24));
+                qToLittleEndian<quint32>(SAMPLE_RATE * 2 * 2, reinterpret_cast<uchar*>(h.data()+28));  // ByteRate
+                qToLittleEndian<quint16>(2 * 2, reinterpret_cast<uchar*>(h.data()+32));  // BlockAlign
+                qToLittleEndian<quint16>(16, reinterpret_cast<uchar*>(h.data()+34));  // Bits
+                h[36]='d'; h[37]='a'; h[38]='t'; h[39]='a';
+                qToLittleEndian<quint32>(dataSize, reinterpret_cast<uchar*>(h.data()+40));
+                out.write(h);
+            };
+            writeWavHeader(0);
+            out.seek(44);  // Daten beginnen nach Header
+
+            // DSP-Puffer für den Export (gleiche Effekte wie Live)
+            std::vector<float> fxDelayL(72000, 0.0f), fxDelayR(72000, 0.0f);
+            int fxPos = 0;
+            std::vector<float> haasL(576, 0.0f), haasR(576, 0.0f);
+            int haasPos = 0;
+
+            auto applyFxExport = [&](float& l, float& r) {
+                if (fxR < 0.001f && fxE < 0.001f && fxS < 0.001f) return;
+                const int echoDelay = 14400, reverbDelay = 9600;
+                int eIdx = fxPos - echoDelay; if (eIdx < 0) eIdx += 72000;
+                int rIdx = fxPos - reverbDelay; if (rIdx < 0) rIdx += 72000;
+                float eL = fxDelayL[eIdx], eR = fxDelayR[eIdx];
+                float fbL = fxDelayL[rIdx], fbR = fxDelayR[rIdx];
+                float outL = l + fxE * (eL + 0.35f * fbL);
+                float outR = r + fxE * (eR + 0.35f * fbR);
+                if (fxR > 0.001f) { outL += fxR * (0.55f * fbL); outR += fxR * (0.55f * fbR); }
+                fxDelayL[fxPos] = l + 0.5f * fxR * fbL;
+                fxDelayR[fxPos] = r + 0.5f * fxR * fbR;
+                fxPos = (fxPos + 1) % 72000;
+                if (fxS > 0.001f) {
+                    float hL = haasL[haasPos], hR = haasR[haasPos];
+                    haasL[haasPos] = outL; haasR[haasPos] = outR;
+                    haasPos = (haasPos + 1) % 576;
+                    outL += fxS * 0.5f * hR;
+                    outR += fxS * 0.5f * hL;
+                }
+                outL = qBound(-1.0f, outL, 1.0f);
+                outR = qBound(-1.0f, outR, 1.0f);
+                l = outL; r = outR;
+            };
+
+            // Eigene Player-Instanz pro Subsong (wie die Live-App: stop()+play()).
+            // WICHTIG: selectSong+load auf DEMselben sidplayfp liefert Müll (Null-Samples);
+            // nur mit frischem Player pro Subsong ist der Render sauber.
+            std::vector<short> buf(BLOCK * 2);
+            for (int s = 1; s <= totalSubs; ++s) {
+                m_tune->selectSong(s - 1);
+
+                ReSIDfpBuilder* subBuilder = new ReSIDfpBuilder("export");
+                sidplayfp* subPlayer = new sidplayfp();
+                SidConfig subConfig;
+                subConfig.sidEmulation = subBuilder;
+                subConfig.defaultC64Model = SidConfig::PAL;
+                subConfig.forceC64Model = true;
+                subConfig.defaultSidModel = (m_chipModel == "MOS8580") ? SidConfig::MOS8580 : SidConfig::MOS6581;
+                subConfig.forceSidModel = false;
+                subConfig.frequency = SAMPLE_RATE;
+                subConfig.samplingMethod = SidConfig::RESAMPLE_INTERPOLATE;
+                if (sidChips >= 2) subConfig.secondSidAddress = 0xD420;
+                if (sidChips >= 3) subConfig.thirdSidAddress = 0xD440;
+                if (!subPlayer->config(subConfig) || !subPlayer->load(m_tune)) {
+                    delete subPlayer; delete subBuilder;
+                    emit errorOccurred("Subsong konnte nicht geladen werden");
+                    emit exportFinished(false, target);
+                    out.close();
+                    return;
+                }
+                subPlayer->initMixer(stereo);
+                emit exportProgress(s, totalSubs);
+
+                const quint64 totalFrames = SAMPLE_RATE * DURATION_SEC;
+                quint64 framesDone = 0;
+                while (framesDone < totalFrames) {
+                    unsigned int want = BLOCK;
+                    unsigned int cycles = static_cast<unsigned int>(want * 985248ULL / SAMPLE_RATE);
+                    int produced = subPlayer->play(cycles);
+                    if (produced <= 0) break;
+                    unsigned int mixed = subPlayer->mix(buf.data(), (unsigned int)produced);
+                    if (mixed == 0) break;
+
+                    for (unsigned int i = 0; i < mixed; ++i) {
+                        if (stereo && (i + 1) < mixed && (i % 2) == 0) {
+                            // Stereo: L/R-Paar
+                            float l = buf[i] / 32768.0f, r = buf[i+1] / 32768.0f;
+                            applyFxExport(l, r);
+                            buf[i] = static_cast<short>(qBound(-32768.0f, l * 32768.0f, 32767.0f));
+                            buf[i+1] = static_cast<short>(qBound(-32768.0f, r * 32768.0f, 32767.0f));
+                        } else if (!stereo) {
+                            // Mono: jedes Sample einzeln (Mixer liefert 1 Sample/Frame!)
+                            float s = buf[i] / 32768.0f;
+                            float l = s, r = s;
+                            applyFxExport(l, r);
+                            buf[i] = static_cast<short>(qBound(-32768.0f, ((l + r) * 0.5f) * 32768.0f, 32767.0f));
+                        }
+                    }
+                    // Stereo-Interleaved schreiben (immer 2 Kanäle)
+                    if (stereo) {
+                        out.write(reinterpret_cast<const char*>(buf.data()), mixed * 2);
+                    } else {
+                        // Mono → beide Kanäle gleich
+                        QByteArray monoBuf;
+                        monoBuf.reserve(mixed * 2);
+                        for (unsigned int i = 0; i < mixed; ++i) {
+                            char ls = static_cast<char>(buf[i] & 0xFF);
+                            char hs = static_cast<char>((buf[i] >> 8) & 0xFF);
+                            monoBuf.append(ls); monoBuf.append(hs);
+                            monoBuf.append(ls); monoBuf.append(hs);
+                        }
+                        out.write(monoBuf);
+                    }
+                    framesDone += (stereo ? mixed / 2 : mixed);
+                }
+                delete subPlayer; delete subBuilder;
+            }
+
+            // Header mit echter Größe aktualisieren
+            const qint64 finalSize = out.size() - 44;
+            writeWavHeader(static_cast<quint32>(finalSize));
+            out.close();
+
+            // Zustand wiederherstellen (Subsong, den der Nutzer gehört hat)
+            m_tune->selectSong(currentSong - 1);
+
+            emit exportFinished(true, target);
+        });
+    }
+
     Q_INVOKABLE void selectSubsong(int song) {
         if (!m_tune || song < 1 || song > m_subsongs) return;
         m_tune->selectSong(song - 1);
@@ -905,6 +1218,9 @@ signals:
     void placesChanged();
     void loadingChanged();
     void coverModeChanged();
+    void fxChanged();
+    void exportProgress(int current, int total);
+    void exportFinished(bool success, const QString& filePath);
     void waveformReady(const QByteArray& samples);
     void errorOccurred(const QString& message);
     void infoMessage(const QString& message);
@@ -933,6 +1249,9 @@ private:
     QVariantList m_places;
     bool m_loading = false;
     bool m_coverMode = false;
+    float m_fxReverb = 0.0f;
+    float m_fxEcho = 0.0f;
+    float m_fxSpatial = 0.0f;
     int m_subsongs = 0, m_currentSubsong = 1, m_sidChips = 1;
     bool m_isPlaying = false;
     bool m_stereoMode = false;
