@@ -55,6 +55,14 @@ sudo apt install qt6-base-dev qt6-declarative-dev qt6-multimedia-gstreamer libsi
 
 > Hinweis: Samba-/Netzlaufwerk-Orte (KDE-Places) erscheinen nur auf Systemen mit KIO/kioclient5 (KDE/Plasma). Auf anderen Desktops bleiben die lokalen Ordner voll nutzbar.
 
+## Windows
+
+**Windows 10/11 (x86_64):** Einfach die [PrismaSID-Setup-1.0.0.exe](https://github.com/Shadowwrath73/PrismaSID/releases/download/v1.0.0/PrismaSID-Setup-1.0.0.exe) herunterladen, doppelklicken, durchklicken — fertig. Keine weiteren Abhängigkeiten nötig (Qt6, FFmpeg und die SID-Engine sind komplett im Installer enthalten).
+
+**Portabel:** Alternativ den Inhalt des Installers in einen beliebigen Ordner entpacken (`PrismaSID-Setup-1.0.0.exe /VERYSILENT /DIR=C:\PrismaSID`) und `prismasid.exe` direkt starten.
+
+> Hinweis: Samba-/Netzlaufwerk-Orte (KDE-Places) gibt es unter Windows nicht — die lokalen Ordner und der Datei-Browser sind voll nutzbar.
+
 ## Bedienung
 
 - **📂 Öffnen** — Datei-Browser mit KDE-Orten (auch Samba): Klick auf Song spielt sofort
