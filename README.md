@@ -1,6 +1,8 @@
-# PrismaSID 🌈
+# PrismaSID
 
-**Der erste moderne SID-Player seit Jahrzehnten.**
+Der erste moderne C64-SID-Player seit Jahrzehnten — **Windows & Linux**, gebaut mit Qt6/QML, libsidplayfp/reSIDfp, GPU-Regenbogen-Visualisierung, Echtzeit-Effekten (Reverb/Echo/Spatial) und WAV-Export.
+
+> 🎨 **Vibe Coding**: Dieses Projekt wurde im engen Zusammenspiel zwischen Mensch und KI entwickelt — Vision, Musik, Tests und Feedback kommen von Mike, der Code entsteht im Dialog mit einer KI. Jedes Feature wurde gehört, getestet und verfeinert, bis es sitzt. Open Source, ehrlich, mit Herz.
 
 PrismaSID ist ein ultramoderner Player für C64-Chipmusik (SID-Dateien) — mit dunkler Glas-Oberfläche, GPU-beschleunigter Regenbogen-Visualisierung und vollem Funktionsumfang. Gebaut auf **libsidplayfp** (dem Goldstandard der SID-Emulation) und **Qt6**.
 
@@ -16,6 +18,8 @@ PrismaSID ist ein ultramoderner Player für C64-Chipmusik (SID-Dateien) — mit 
 - 🖼 **HVSC-Browsing** — zuschaltbare Cover-Kachel-Ansicht (cover.jpg/png in Album-Ordnern) oder klassische Liste
 - 📋 **Playlist** mit Hinzufügen/Entfernen/Leeren, Ordner-Import (inkl. Unterordner) und **Persistenz** (letzte Playlist wird wiederhergestellt)
 - 🎧 **Automatische Geräte-Umschaltung** — wechsle Kopfhörer/Lautsprecher während der Wiedergabe, der Sound zieht nahtlos um
+- 🎛️ **Echtzeit-Effekte** — Reverb, Echo und Spatial (Stereo-Widening) direkt im Render-Thread, dezent ausklappbares Regler-Panel
+- 💾 **WAV-Export** — rendert alle Subsongs (je 3 Min) offline in eine 48kHz/16-Bit/Stereo-WAV, inklusive Effekten — fürs Handy, den MP3-Player oder die DAW
 - 🔤 Korrekte Umlaute (SID-Tags sind Latin-1)
 - 🖥 Läuft auf KDE/Plasma (Wayland & X11), Arch-basierten Distros
 
