@@ -1000,10 +1000,12 @@ public:
     // Asynchron (QtConcurrent) — UI bleibt flüssig, Fortschritt via exportProgress
     Q_INVOKABLE void exportWav(const QString& path) {
         if (m_tune == nullptr || path.isEmpty()) return;
-        // QML-FileDialog liefert ggf. eine file://-URL — robust in lokalen Pfad wandeln
+        // QML-FileDialog liefert ein QUrl (file:///C:/... auf Windows) — robust wandeln
         QString target = path;
         if (target.startsWith("file://")) target = QUrl(target).toLocalFile();
         if (target.isEmpty()) return;
+        // Windows: QUrl.toLocalFile() kann "/C:/..." liefern — führenden Slash entfernen
+        if (target.startsWith("/C:/") || target.startsWith("/c:/")) target = target.mid(1);
         stop();
 
         const SidTuneInfo* info = m_tune->getInfo();

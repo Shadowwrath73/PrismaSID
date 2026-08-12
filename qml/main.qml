@@ -1249,7 +1249,7 @@ ApplicationWindow {
         fileMode: FileDialog.SaveFile
         defaultSuffix: "wav"
         nameFilters: ["WAV-Dateien (*.wav)"]
-        onAccepted: sidBackend.exportWav(selectedFile.toString().replace("file://", ""))
+        onAccepted: sidBackend.exportWav(selectedFile)
     }
 
     // ── Export-Fortschritt (Toast unten rechts) ──
