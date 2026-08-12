@@ -4,8 +4,6 @@
 
 PrismaSID ist ein ultramoderner Player für C64-Chipmusik (SID-Dateien) — mit dunkler Glas-Oberfläche, GPU-beschleunigter Regenbogen-Visualisierung und vollem Funktionsumfang. Gebaut auf **libsidplayfp** (dem Goldstandard der SID-Emulation) und **Qt6**.
 
-
-
 ![PrismaSID](screenshots/prismasid_main.png)
 
 ## Features
@@ -25,14 +23,37 @@ PrismaSID ist ein ultramoderner Player für C64-Chipmusik (SID-Dateien) — mit 
 
 **Abhängigkeiten:** Qt6 (Core, Gui, Qml, Quick, Multimedia, Concurrent), libsidplayfp, libresidfp, CMake ≥ 3.16, C++17-Compiler
 
+**Debian/Ubuntu:**
 ```bash
-git clone https://github.com/shadowmaker/PrismaSID.git
+sudo apt install qt6-base-dev qt6-declarative-dev qt6-multimedia-gstreamer \
+                 libsidplayfp-dev libresidfp-dev cmake g++
+```
+
+**Arch/CachyOS:**
+```bash
+sudo pacman -S qt6-base qt6-declarative qt6-multimedia gstreamer libsidplayfp cmake
+```
+
+**Bauen:**
+```bash
+git clone https://github.com/Shadowwrath73/PrismaSID.git
 cd PrismaSID
 cmake -B build
 cmake --build build
 ./build/prismasid            # startet leer
 ./build/prismasid song.sid   # startet und spielt sofort
 ```
+
+## AppImage
+
+Das [AppImage](https://github.com/Shadowwrath73/PrismaSID/releases) (x86_64) bündelt die SID-Engine und nutzt Qt6/GStreamer vom System — auf Debian/Ubuntu einmalig:
+
+```bash
+sudo apt install qt6-base-dev qt6-declarative-dev qt6-multimedia-gstreamer libsidplayfp-dev libresidfp-dev
+./PrismaSID-x86_64.AppImage
+```
+
+> Hinweis: Samba-/Netzlaufwerk-Orte (KDE-Places) erscheinen nur auf Systemen mit KIO/kioclient5 (KDE/Plasma). Auf anderen Desktops bleiben die lokalen Ordner voll nutzbar.
 
 ## Bedienung
 

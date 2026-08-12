@@ -363,7 +363,10 @@ public:
         m_places.clear();
         m_places.append(QVariantMap{{"name", "🏠 Home"}, {"path", QDir::homePath()}});
 
-        // Benutzer-Orte aus KDEs xbel-Datei (file:// UND smb://)
+        // KIO verfügbar? (kioclient5 = KDE-Komponente — auf GNOME/anderen Desktops fehlt sie)
+        const bool haveKio = !QStandardPaths::findExecutable("kioclient5").isEmpty();
+
+        // Benutzer-Orte aus KDEs xbel-Datei (file:// UND smb:// — smb nur mit KIO)
         const QString xbel = QDir::homePath() + "/.local/share/user-places.xbel";
         QFile f(xbel);
         if (f.open(QIODevice::ReadOnly)) {
@@ -377,7 +380,10 @@ public:
                 QString name = m.captured(2);
                 QString path = href;
                 if (href.startsWith("file://")) path = href.mid(7);
-                else if (!href.startsWith("smb://")) continue;  // nur file+smb
+                else if (href.startsWith("smb://")) {
+                    if (!haveKio) continue;  // Samba-Orte ohne KIO nicht anbieten (würden fehlschlagen)
+                }
+                else continue;  // nur file+smb
 
                 // Duplikate vermeiden
                 bool dup = false;
