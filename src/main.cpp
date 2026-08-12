@@ -30,16 +30,26 @@ int main(int argc, char* argv[]) {
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("sidBackend", &backend);
 
-    // QML relativ zum Binary suchen: qml/main.qml neben src/
-    QString qmlPath = QFileInfo(QCoreApplication::applicationDirPath() + "/../qml/main.qml").absoluteFilePath();
-    if (!QFileInfo::exists(qmlPath)) {
-        qmlPath = QFileInfo(QCoreApplication::applicationDirPath() + "/qml/main.qml").absoluteFilePath();
+    // QML relativ zum Binary suchen: qml/main.qml neben src/, dann installierter/AppDir-Pfad
+    QString qmlPath;
+    const QStringList candidates = {
+        QFileInfo(QCoreApplication::applicationDirPath() + "/../qml/main.qml").absoluteFilePath(),
+        QFileInfo(QCoreApplication::applicationDirPath() + "/qml/main.qml").absoluteFilePath(),
+        QFileInfo(QCoreApplication::applicationDirPath() + "/../share/prismasid/qml/main.qml").absoluteFilePath(),  // AppImage-Layout
+        QFileInfo("qml/main.qml").absoluteFilePath(),
+        QFileInfo("main.qml").absoluteFilePath(),
+        QStringLiteral("/usr/share/prismasid/qml/main.qml"),
+        QStringLiteral("/usr/local/share/prismasid/qml/main.qml")
+    };
+    for (const QString& c : candidates) {
+        if (QFileInfo::exists(c)) {
+            qmlPath = c;
+            break;
+        }
     }
-    if (!QFileInfo::exists(qmlPath)) {
-        qmlPath = QFileInfo("qml/main.qml").absoluteFilePath();
-    }
-    if (!QFileInfo::exists(qmlPath)) {
-        qmlPath = QFileInfo("main.qml").absoluteFilePath();
+    if (qmlPath.isEmpty()) {
+        qWarning("PrismaSID: main.qml nicht gefunden — Pfade geprüft, breche ab.");
+        return -2;
     }
 
     engine.load(QUrl::fromLocalFile(qmlPath));
