@@ -2,7 +2,7 @@
 
 Der erste moderne C64-SID-Player seit Jahrzehnten — **Windows & Linux**, gebaut mit Qt6/QML, libsidplayfp/reSIDfp, GPU-Regenbogen-Visualisierung, Echtzeit-Effekten (Reverb/Echo/Spatial) und WAV-Export.
 
-> 🎨 **Vibe Coding**: Dieses Projekt wurde im engen Zusammenspiel zwischen Mensch und KI entwickelt — Vision, Musik, Tests und Feedback kommen von Mike, der Code entsteht im Dialog mit einer KI. Jedes Feature wurde gehört, getestet und verfeinert, bis es sitzt. Open Source, ehrlich, mit Herz.
+> 🎨 Vibe Coding — entwickelt im Dialog zwischen Mensch und KI.
 
 PrismaSID ist ein ultramoderner Player für C64-Chipmusik (SID-Dateien) — mit dunkler Glas-Oberfläche, GPU-beschleunigter Regenbogen-Visualisierung und vollem Funktionsumfang. Gebaut auf **libsidplayfp** (dem Goldstandard der SID-Emulation) und **Qt6**.
 
