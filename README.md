@@ -4,7 +4,6 @@
 
 PrismaSID ist ein ultramoderner Player für C64-Chipmusik (SID-Dateien) — mit dunkler Glas-Oberfläche, GPU-beschleunigter Regenbogen-Visualisierung und vollem Funktionsumfang. Gebaut auf **libsidplayfp** (dem Goldstandard der SID-Emulation) und **Qt6**.
 
-![PrismaSID](screenshots/prismasid_main.png)
 
 ## Features
 
