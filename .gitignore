@@ -13,3 +13,4 @@ src/sinustest.cpp
 src/sidplayer_kern.cpp
 src/backend_smb_test.cpp
 start.sh
+*.sid
