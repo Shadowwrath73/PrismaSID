@@ -238,6 +238,45 @@ ApplicationWindow {
                         }
                     }
                 }
+
+                // Auto-Weiter-Schalter (Song-Ende → nächster Subsong/Track)
+                Text {
+                    text: "AUTO"
+                    font.pixelSize: 10
+                    font.letterSpacing: 1
+                    color: textDim
+                    verticalAlignment: Text.AlignVCenter
+                }
+                Rectangle {
+                    width: 76
+                    height: 28
+                    radius: 14
+                    color: sidBackend.autoAdvance ? Qt.rgba(0.31, 0.77, 0.97, 0.18)
+                                                  : Qt.rgba(1,1,1,0.05)
+                    border.color: sidBackend.autoAdvance ? accent : glassBorder
+                    border.width: 1
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 10
+                        Text {
+                            text: "AUS"
+                            font.pixelSize: 10
+                            font.weight: sidBackend.autoAdvance ? Font.Normal : Font.DemiBold
+                            color: sidBackend.autoAdvance ? textDim : accent
+                        }
+                        Text {
+                            text: "AN"
+                            font.pixelSize: 10
+                            font.weight: sidBackend.autoAdvance ? Font.DemiBold : Font.Normal
+                            color: sidBackend.autoAdvance ? accent : textDim
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: sidBackend.autoAdvance = !sidBackend.autoAdvance
+                    }
+                }
             }
 
             // Wellenform-Display (Canvas — performant, kein Repeater-Ruckeln)
@@ -1266,6 +1305,11 @@ ApplicationWindow {
             } else {
                 exportToast.text = "❌ Export fehlgeschlagen"
             }
+            exportToast.visible = true
+            exportTimer.restart()
+        }
+        function onInfoMessage(message) {
+            exportToast.text = message
             exportToast.visible = true
             exportTimer.restart()
         }

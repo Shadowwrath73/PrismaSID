@@ -36,12 +36,15 @@
 #include <thread>
 #include <chrono>
 #include <vector>
+#include <functional>
+#include <unordered_map>
 
 #include <sidplayfp/SidTune.h>
 #include <sidplayfp/SidTuneInfo.h>
 #include <sidplayfp/sidplayfp.h>
 #include <sidplayfp/SidConfig.h>
 #include <sidplayfp/SidInfo.h>
+#include <sidplayfp/SidDatabase.h>
 #include <sidplayfp/builders/residfp.h>
 
 // Audio-Quelle (QIODevice für QAudioSink-Pull) — RENDER-THREAD + RINGPUFFER
@@ -70,6 +73,7 @@ public:
         m_ringWrite = 0;
         m_ringFull = false;
         m_renderRunning = true;
+        resetSongEnd();
         m_renderThread = std::thread(&SIDAudioSource::renderLoop, this);
     }
 
@@ -91,6 +95,127 @@ public:
 
     // Wellenform-Callback (lock-frei, nur memcpy)
     std::function<void(const float*, int)> onWaveform;
+
+    // ── Auto-Weiter (Song-Ende-Erkennung) ─────────────────────────────
+    // Wird vom Render-Thread gesetzt, wenn der Song erkannt wurde:
+    //   onSongEnd("loop")    — Sample-Sequenz wiederholt sich exakt (SID-Loop)
+    //   onSongEnd("silence") — X Sekunden Stille (Song endet ohne Loop)
+    // ACHTUNG: wird im Render-Thread gefeuert → Backend muss per
+    // QMetaObject::invokeMethod in den GUI-Thread wechseln (stop() joinct
+    // den Render-Thread → direkter Call = Deadlock!).
+    std::function<void(const char*)> onSongEnd;
+
+    // ── Loop-Erkennung: ROLLING HASH mit gleitendem Fenster ──────────
+    // Problem Block-Hash (1. Versuch): feste Blockgrenzen (4096 Samples)
+    // matchen nur, wenn die Loop-Länge ein Vielfaches davon ist — SID-Loops
+    // beginnen aber an beliebigen Positionen → phasenverschoben → nie erkannt.
+    // Lösung: Fenster-Hash wandert mit JEDEM Sample mit (rolling hash),
+    // Snapshots alle SNAPSHOT_EVERY Samples → Loop an jeder Position sichtbar.
+    static constexpr int LOOP_WIN = 4096;              // Fenster: ~85ms @48kHz
+    static constexpr int LOOP_SNAPSHOT = 512;          // Snapshot alle ~10.7ms
+    static constexpr int LOOP_MIN_DISTANCE = 480000;   // Loop erst ab ~10s Abstand
+    static constexpr int LOOP_NEED_MATCHES = 3;        // lückenlose Bestätigungen
+    static constexpr uint64_t LOOP_PRIME = 1315423911ull;
+    std::vector<short> m_win;                          // Ring der letzten Samples
+    int m_winPos = 0;
+    int m_winCount = 0;
+    uint64_t m_rollHash = 0;
+    uint64_t m_rollPow = 1;                            // PRIME^LOOP_WIN mod 2^64
+    std::unordered_map<uint64_t, int> m_hashPos;       // Hash → Stream-Position
+    int m_matchStreak = 0;
+    int m_lastMatchSrc = -1;                           // Position des Streak-Ursprungs
+
+    // Stille-Erkennung: RMS unter Schwelle für X Sekunden → Song-Ende
+    static constexpr float SILENCE_RMS = 0.0015f;      // ~ -56 dBFS
+    static constexpr int SILENCE_SECONDS = 4;          // 4s Stille = Ende
+    float m_silenceRmsSum = 0.0f;
+    int m_silenceCount = 0;
+    int m_silenceFrames = 0;
+    int m_totalFrames = 0;
+
+    void resetSongEnd() {
+        m_win.assign(LOOP_WIN, 0);
+        m_winPos = 0;
+        m_winCount = 0;
+        m_rollHash = 0;
+        m_rollPow = 1;
+        for (int i = 0; i < LOOP_WIN; ++i) m_rollPow *= LOOP_PRIME;
+        m_hashPos.clear();
+        m_matchStreak = 0;
+        m_lastMatchSrc = -1;
+        m_silenceRmsSum = 0.0f;
+        m_silenceCount = 0;
+        m_silenceFrames = 0;
+        m_totalFrames = 0;
+    }
+
+    // Wird pro gerendertem Sample-Paar aufgerufen (nach FX, vor Ring)
+    void feedSongEnd(short l, short r) {
+        const float s = (static_cast<float>(l) + static_cast<float>(r)) * 0.5f / 32768.0f;
+        // Stille-Erkennung (RMS)
+        m_silenceRmsSum += s * s;
+        m_silenceCount++;
+        m_totalFrames++;
+        if (m_silenceCount >= 48000) {                 // 1s Fenster
+            float rms = std::sqrt(m_silenceRmsSum / m_silenceCount);
+            if (rms < SILENCE_RMS) {
+                m_silenceFrames++;
+                if (m_silenceFrames >= SILENCE_SECONDS && m_totalFrames > 48000 * 3) {
+                    if (onSongEnd) onSongEnd("silence");
+                    resetSongEnd();                    // nicht erneut feuern
+                    return;
+                }
+            } else {
+                m_silenceFrames = 0;
+            }
+            m_silenceRmsSum = 0.0f;
+            m_silenceCount = 0;
+        }
+
+        // Loop-Erkennung: Rolling Hash über gleitendes Fenster
+        const short mono = static_cast<short>((static_cast<int>(l) + r) / 2);
+
+        // Fenster-Ring aktualisieren
+        const short alt = m_win[m_winPos];
+        m_win[m_winPos] = mono;
+        m_winPos = (m_winPos + 1) % LOOP_WIN;
+        if (m_winCount < LOOP_WIN) m_winCount++;
+
+        // Rolling Hash: h = h*P + neu − alt*P^LOOP_WIN  (mod 2^64, Overflow)
+        // WICHTIG: MUSS bei JEDEM Sample laufen — auch während der Aufwärm-
+        // phase. Die 0-Dummies im Ring liefern dann automatisch den korrekten
+        // Fenster-Hash (Debug 16.08.: Update erst ab vollem Fenster = Hash
+        // war nie der echte Fenster-Hash → Loops wurden nie erkannt).
+        m_rollHash = m_rollHash * LOOP_PRIME
+                   + static_cast<uint64_t>(static_cast<unsigned short>(mono))
+                   - static_cast<uint64_t>(static_cast<unsigned short>(alt)) * m_rollPow;
+
+        // Snapshot-Prüfung erst ab vollem Fenster
+        if (m_winCount >= LOOP_WIN && (m_totalFrames % LOOP_SNAPSHOT) == 0) {
+            const uint64_t h = m_rollHash;
+            auto it = m_hashPos.find(h);
+            if (it != m_hashPos.end()) {
+                const int prevPos = it->second;
+                const int dist = m_totalFrames - prevPos;
+                if (dist >= LOOP_MIN_DISTANCE) {
+                    // Streak: aufeinanderfolgende Snapshots müssen lückenlos
+                    // matchen — der Ursprung rückt pro Snapshot um LOOP_SNAPSHOT.
+                    if (m_lastMatchSrc == prevPos - LOOP_SNAPSHOT) {
+                        m_matchStreak++;
+                        if (m_matchStreak >= LOOP_NEED_MATCHES) {
+                            if (onSongEnd) onSongEnd("loop");
+                            resetSongEnd();
+                            return;
+                        }
+                    } else {
+                        m_matchStreak = 1;
+                        m_lastMatchSrc = prevPos;
+                    }
+                }
+            }
+            m_hashPos[h] = m_totalFrames;
+        }
+    }
 
     // ── DSP-Effekte (Reverb/Echo/Spatial) — nach dem mix(), vor dem Ring ──
     // Parameter (0.0–1.0): werden vom Backend gesetzt, vom Render-Thread gelesen
@@ -213,9 +338,18 @@ public:
                 }
             }
 
-            // In Ringpuffer schreiben
-            for (unsigned int i = 0; i < mixed; ++i) {
-                ringPush(m_renderBuf[i]);
+            // In Ringpuffer schreiben (+ Song-Ende-Erkennung)
+            if (stereo) {
+                for (unsigned int i = 0; i + 1 < mixed; i += 2) {
+                    ringPush(m_renderBuf[i]);
+                    ringPush(m_renderBuf[i+1]);
+                    feedSongEnd(m_renderBuf[i], m_renderBuf[i+1]);
+                }
+            } else {
+                for (unsigned int i = 0; i < mixed; ++i) {
+                    ringPush(m_renderBuf[i]);
+                    feedSongEnd(m_renderBuf[i], m_renderBuf[i]);
+                }
             }
         }
     }
@@ -344,6 +478,7 @@ class SIDPlayerBackend : public QObject {
     Q_PROPERTY(bool isPlaying READ isPlaying NOTIFY playingChanged)
     Q_PROPERTY(QString filePath READ filePath NOTIFY songChanged)
     Q_PROPERTY(bool stereoMode READ stereoMode WRITE setStereoMode NOTIFY stereoModeChanged)
+    Q_PROPERTY(bool autoAdvance READ autoAdvance WRITE setAutoAdvance NOTIFY autoAdvanceChanged)
     Q_PROPERTY(int playlistCount READ playlistCount NOTIFY playlistChanged)
     Q_PROPERTY(int playlistIndex READ playlistIndex NOTIFY playlistChanged)
     Q_PROPERTY(QStringList playlist READ playlist NOTIFY playlistChanged)
@@ -392,6 +527,35 @@ public:
         loadPlaces();  // Plasma-Orte aus user-places.xbel laden
         loadPlaylist();  // Letzte Playlist wiederherstellen
 
+        // ── Songlength-Datenbank (HVSC) für Auto-Weiter ──
+        // libsidplayfp bringt SidDatabase mit: MD5 der SID → Länge je Subsong.
+        // WICHTIG (16.08.): die zur Sammlung passende DB ist die .md5-Datei
+        // (Release-85-Stand, MD5s matchen die Sammlungs-Dateien) — die frische
+        // Songlengths.txt von hvsc.de ist NEUER und matcht alte Dateien nicht!
+        m_songDb = new SidDatabase();
+        QStringList dbKandidaten = {
+            QDir::homePath() + "/Downloads/C64Music/DOCUMENTS/Songlengths.md5",
+            "/home/shadowwrath/Downloads/C64Music/DOCUMENTS/Songlengths.md5",
+            QDir::homePath() + "/Downloads/C64Music/DOCUMENTS/Songlengths.txt",
+            "/home/shadowwrath/Downloads/C64Music/DOCUMENTS/Songlengths.txt",
+            QDir::homePath() + "/C64Music/DOCUMENTS/Songlengths.md5",
+            QDir::homePath() + "/C64Music/DOCUMENTS/Songlengths.txt",
+        };
+        for (const QString& db : dbKandidaten) {
+            if (QFile::exists(db) && m_songDb->open(db.toUtf8().constData())) {
+                m_songLengthDbPath = db;
+                break;
+            }
+        }
+        // Weitersprung-Timer: läuft nur bei bekanntem Songlength
+        m_songEndTimer = new QTimer(this);
+        m_songEndTimer->setSingleShot(true);
+        connect(m_songEndTimer, &QTimer::timeout, this, [this]() {
+            if (m_autoAdvance && m_isPlaying) {
+                handleSongEnd("songlength");
+            }
+        });
+
         // Aktives Audiogerät überwachen: Wechsel (Kopfhörer→Lautsprecher etc.)
         // → Wiedergabe automatisch aufs neue Gerät umziehen
         m_devices = new QMediaDevices(this);
@@ -418,6 +582,7 @@ public:
     ~SIDPlayerBackend() {
         stop();
         delete m_tune;
+        delete m_songDb;
     }
 
     QString title() const { return m_title; }
@@ -444,6 +609,33 @@ public:
         if (m_isPlaying) {
             stop();
             play();
+        }
+    }
+
+    bool autoAdvance() const { return m_autoAdvance; }
+    void setAutoAdvance(bool on) {
+        if (m_autoAdvance == on) return;
+        m_autoAdvance = on;
+        emit autoAdvanceChanged();
+    }
+
+    // ── Auto-Weiter: Song-Ende vom Render-Thread → nächster Subsong/Track ──
+    // Wird über onSongEnd im SIDAudioSource gefeuert (Render-Thread!).
+    // Wechsel via invokeMethod in den GUI-Thread, weil stop()/play() den
+    // Render-Thread joinen — direkter Call vom Render-Thread = Deadlock.
+    void handleSongEnd(const QString& grund) {
+        if (!m_autoAdvance) return;
+        // Mehrere Subsongs → nächster Subsong (Loop innerhalb des Tracks)
+        if (m_currentSubsong < m_subsongs) {
+            selectSubsong(m_currentSubsong + 1);
+            emit infoMessage("→ Subsong " + QString::number(m_currentSubsong)
+                             + " (" + grund + ")");
+        } else if (!m_playlist.isEmpty()) {
+            // Letzter Subsong → nächster Titel in der Playlist
+            int next = (m_playlistIndex + 1) % m_playlist.size();
+            playFromPlaylist(next);
+            emit infoMessage("→ " + QFileInfo(m_playlist[next]).fileName()
+                             + " (" + grund + ")");
         }
     }
 
@@ -814,6 +1006,24 @@ public:
         m_c64Model = (info->clockSpeed() == SidTuneInfo::CLOCK_PAL) ? "PAL" : "NTSC";
         m_tuneLengthSec = 0;  // Songlängen nicht in libsidplayfp 3.x verfügbar
         m_fileName = QFileInfo(path).fileName();
+
+        // Songlength aus HVSC-Datenbank (falls geladen): MD5 → Länge je Subsong
+        m_songLengthSec = 0;
+        if (m_songDb && !m_songLengthDbPath.isEmpty()) {
+            // createMD5New() liefert Pointer auf INTERNEN Buffer (kein new[]!) —
+            // eigenen Buffer übergeben, kein delete[] auf den Rückgabewert
+            // (delete[] crashte: 16.08., Speicherzugriffsfehler).
+            char md5Buf[33];
+            const char* md5 = m_tune->createMD5New(md5Buf);
+            if (md5) {
+                int lenMs = m_songDb->lengthMs(md5, static_cast<unsigned int>(m_currentSubsong));
+                if (lenMs > 0) {
+                    m_songLengthSec = lenMs / 1000;
+                    m_tuneLengthSec = m_songLengthSec;
+                }
+            }
+        }
+
         emit songChanged();
         return true;
     }
@@ -942,6 +1152,10 @@ public:
         int bps = (format.sampleFormat() == QAudioFormat::Int32) ? 4 : 2;
 
         m_audioSource = new SIDAudioSource(*m_player, outCh, bps, effectiveStereo);
+        // Effekte auf den frischen AudioSource anwenden — sonst startet jeder
+        // Song/Subsong mit FX=0 (der Source hat eigene Atomics; die Slider-
+        // Änderungen gelten nur bis zum nächsten stop()/play()). Fix 16.08.
+        m_audioSource->setEffects(m_fxReverb, m_fxEcho, m_fxSpatial);
         m_audioSource->onWaveform = [this](const float* samples, int count) {
             // Audio-Thread: Samples in Wellenform-Ring schreiben (kurzer Mutex)
             std::lock_guard<std::mutex> lock(m_waveMutex);
@@ -954,6 +1168,15 @@ public:
                     m_waveRingStart = (m_waveRingStart + 1) % WAVE_RING_SIZE;
                 }
             }
+        };
+        // Song-Ende (Loop/Stille) kommt vom Render-Thread → GUI-Thread via
+        // QueuedConnection (stop() joinct den Render-Thread — direkter Call
+        // vom Render-Thread wäre ein Deadlock).
+        m_audioSource->onSongEnd = [this](const char* grund) {
+            const QString g = QString::fromUtf8(grund);
+            QMetaObject::invokeMethod(this, [this, g]() {
+                handleSongEnd(g);
+            }, Qt::QueuedConnection);
         };
         m_audioSink = new QAudioSink(outDev, format);
         // Debug: Was nutzt der Sink wirklich?
@@ -974,6 +1197,11 @@ public:
 
         m_isPlaying = true;
         emit playingChanged();
+
+        // Auto-Weiter: Songlength-Timer starten (falls Länge bekannt)
+        if (m_songEndTimer && m_songLengthSec > 0) {
+            m_songEndTimer->start(m_songLengthSec * 1000);
+        }
         return true;
     }
 
@@ -994,6 +1222,7 @@ public:
         }
         m_isPlaying = false;
         emit playingChanged();
+        if (m_songEndTimer) m_songEndTimer->stop();
     }
 
     // ── WAV-Export: rendert alle Subsongs (je 3 Min) offline in eine WAV-Datei ──
@@ -1192,6 +1421,19 @@ public:
         if (!m_tune || song < 1 || song > m_subsongs) return;
         m_tune->selectSong(song - 1);
         m_currentSubsong = song;
+        // Songlength für den neuen Subsong laden (falls DB vorhanden)
+        m_songLengthSec = 0;
+        if (m_songDb && !m_songLengthDbPath.isEmpty()) {
+            char md5Buf[33];
+            const char* md5 = m_tune->createMD5New(md5Buf);
+            if (md5) {
+                int lenMs = m_songDb->lengthMs(md5, static_cast<unsigned int>(song));
+                if (lenMs > 0) {
+                    m_songLengthSec = lenMs / 1000;
+                    m_tuneLengthSec = m_songLengthSec;
+                }
+            }
+        }
         emit subsongChanged();
         if (m_isPlaying) {
             stop();
@@ -1215,6 +1457,7 @@ signals:
     void chipModelChanged();
     void playingChanged();
     void stereoModeChanged();
+    void autoAdvanceChanged();
     void playlistChanged();
     void dirChanged();
     void placesChanged();
@@ -1234,6 +1477,10 @@ private:
     QAudioSink* m_audioSink = nullptr;
     SIDAudioSource* m_audioSource = nullptr;
     QTimer* m_waveTimer = nullptr;
+    QTimer* m_songEndTimer = nullptr;      // Auto-Weiter bei bekanntem Songlength
+    SidDatabase* m_songDb = nullptr;       // HVSC Songlengths.txt (falls gefunden)
+    QString m_songLengthDbPath;            // Pfad der geladenen DB
+    int m_songLengthSec = 0;               // Länge des aktuellen Subsongs (0 = unbekannt)
     QMediaDevices* m_devices = nullptr;
     QString m_lastDeviceId;
     static constexpr int WAVE_RING_SIZE = 4096;   // ~85ms @48kHz Samples
@@ -1251,6 +1498,7 @@ private:
     QVariantList m_places;
     bool m_loading = false;
     bool m_coverMode = false;
+    bool m_autoAdvance = true;   // Auto-Weiter bei Song-Ende (Loop/Stille)
     float m_fxReverb = 0.0f;
     float m_fxEcho = 0.0f;
     float m_fxSpatial = 0.0f;
