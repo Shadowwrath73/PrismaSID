@@ -21,6 +21,7 @@
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QColor>
+#include <QSettings>
 #include <QFile>
 #include <QUrl>
 #include <QRegularExpression>
@@ -479,6 +480,8 @@ class SIDPlayerBackend : public QObject {
     Q_PROPERTY(QString filePath READ filePath NOTIFY songChanged)
     Q_PROPERTY(bool stereoMode READ stereoMode WRITE setStereoMode NOTIFY stereoModeChanged)
     Q_PROPERTY(bool autoAdvance READ autoAdvance WRITE setAutoAdvance NOTIFY autoAdvanceChanged)
+    Q_PROPERTY(QString songLengthDbPath READ songLengthDbPath NOTIFY songLengthDbChanged)
+    Q_PROPERTY(bool hasSongLengthDb READ hasSongLengthDb NOTIFY songLengthDbChanged)
     Q_PROPERTY(int playlistCount READ playlistCount NOTIFY playlistChanged)
     Q_PROPERTY(int playlistIndex READ playlistIndex NOTIFY playlistChanged)
     Q_PROPERTY(QStringList playlist READ playlist NOTIFY playlistChanged)
@@ -533,20 +536,30 @@ public:
         // (Release-85-Stand, MD5s matchen die Sammlungs-Dateien) — die frische
         // Songlengths.txt von hvsc.de ist NEUER und matcht alte Dateien nicht!
         m_songDb = new SidDatabase();
-        QStringList dbKandidaten = {
-            QDir::homePath() + "/Downloads/C64Music/DOCUMENTS/Songlengths.md5",
-            "/home/shadowwrath/Downloads/C64Music/DOCUMENTS/Songlengths.md5",
-            QDir::homePath() + "/Downloads/C64Music/DOCUMENTS/Songlengths.txt",
-            "/home/shadowwrath/Downloads/C64Music/DOCUMENTS/Songlengths.txt",
-            QDir::homePath() + "/C64Music/DOCUMENTS/Songlengths.md5",
-            QDir::homePath() + "/C64Music/DOCUMENTS/Songlengths.txt",
-        };
-        for (const QString& db : dbKandidaten) {
-            if (QFile::exists(db) && m_songDb->open(db.toUtf8().constData())) {
-                m_songLengthDbPath = db;
-                break;
+        // Manuell gewählte DB (QSettings) hat Vorrang, dann Auto-Suche
+        const QString savedDb = QSettings().value("songLengthDb", QString()).toString();
+        if (!savedDb.isEmpty() && QFile::exists(savedDb)) {
+            if (m_songDb->open(savedDb.toUtf8().constData())) {
+                m_songLengthDbPath = savedDb;
             }
         }
+        if (m_songLengthDbPath.isEmpty()) {
+            QStringList dbKandidaten = {
+                QDir::homePath() + "/Downloads/C64Music/DOCUMENTS/Songlengths.md5",
+                "/home/shadowwrath/Downloads/C64Music/DOCUMENTS/Songlengths.md5",
+                QDir::homePath() + "/Downloads/C64Music/DOCUMENTS/Songlengths.txt",
+                "/home/shadowwrath/Downloads/C64Music/DOCUMENTS/Songlengths.txt",
+                QDir::homePath() + "/C64Music/DOCUMENTS/Songlengths.md5",
+                QDir::homePath() + "/C64Music/DOCUMENTS/Songlengths.txt",
+            };
+            for (const QString& db : dbKandidaten) {
+                if (QFile::exists(db) && m_songDb->open(db.toUtf8().constData())) {
+                    m_songLengthDbPath = db;
+                    break;
+                }
+            }
+        }
+        emit songLengthDbChanged();
         // Weitersprung-Timer: läuft nur bei bekanntem Songlength
         m_songEndTimer = new QTimer(this);
         m_songEndTimer->setSingleShot(true);
@@ -617,6 +630,52 @@ public:
         if (m_autoAdvance == on) return;
         m_autoAdvance = on;
         emit autoAdvanceChanged();
+    }
+
+    // ── Songlength-Datenbank: Pfad + manuelle Auswahl ──
+    QString songLengthDbPath() const { return m_songLengthDbPath; }
+    bool hasSongLengthDb() const { return !m_songLengthDbPath.isEmpty(); }
+
+    // Manuell auf eine Songlengths-Datei zeigen (Dateidialog in QML).
+    // Öffnet die Datei als SidDatabase, merkt sich den Pfad (QSettings) und
+    // lädt die Länge des aktuellen Subsongs neu.
+    Q_INVOKABLE void setSongLengthDb(const QString& path) {
+        if (path.isEmpty()) return;
+        // Windows: QUrl → lokaler Pfad
+        QString p = path;
+        if (p.startsWith("file://")) p = QUrl(p).toLocalFile();
+        if (p.startsWith("/C:/") || p.startsWith("/c:/")) p = p.mid(1);
+        if (!QFile::exists(p)) {
+            emit infoMessage("Songlength-Datei nicht gefunden: " + p);
+            return;
+        }
+        if (!m_songDb) m_songDb = new SidDatabase();
+        if (!m_songDb->open(p.toUtf8().constData())) {
+            emit infoMessage("Konnte Songlength-Datei nicht öffnen: " + QFileInfo(p).fileName());
+            return;
+        }
+        m_songLengthDbPath = p;
+        QSettings().setValue("songLengthDb", p);
+        // Länge des aktuellen Songs neu laden
+        m_songLengthSec = 0;
+        if (m_tune) {
+            char md5Buf[33];
+            const char* md5 = m_tune->createMD5New(md5Buf);
+            if (md5) {
+                int lenMs = m_songDb->lengthMs(md5, static_cast<unsigned int>(m_currentSubsong));
+                if (lenMs > 0) {
+                    m_songLengthSec = lenMs / 1000;
+                    m_tuneLengthSec = m_songLengthSec;
+                }
+            }
+        }
+        emit songLengthDbChanged();
+        emit infoMessage("Songlength-DB geladen: " + QFileInfo(p).fileName()
+                         + (m_songLengthSec > 0 ? " (aktueller Song: " + QString::number(m_songLengthSec) + "s)" : " (kein Eintrag für aktuellen Song)"));
+        if (m_isPlaying) {
+            m_songEndTimer->stop();
+            m_songEndTimer->start(m_songLengthSec * 1000);
+        }
     }
 
     // ── Auto-Weiter: Song-Ende vom Render-Thread → nächster Subsong/Track ──
@@ -1458,6 +1517,7 @@ signals:
     void playingChanged();
     void stereoModeChanged();
     void autoAdvanceChanged();
+    void songLengthDbChanged();
     void playlistChanged();
     void dirChanged();
     void placesChanged();

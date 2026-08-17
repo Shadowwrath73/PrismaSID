@@ -277,6 +277,28 @@ ApplicationWindow {
                         onClicked: sidBackend.autoAdvance = !sidBackend.autoAdvance
                     }
                 }
+
+                // Songlength-DB auswählen (📄 — manuell auf Datei zeigen,
+                // falls die Auto-Suche die HVSC-Datei nicht findet)
+                Rectangle {
+                    width: 34
+                    height: 28
+                    radius: 8
+                    color: sidBackend.hasSongLengthDb ? Qt.rgba(0.31, 0.77, 0.97, 0.10)
+                                                      : Qt.rgba(1,1,1,0.05)
+                    border.color: sidBackend.hasSongLengthDb ? accent : glassBorder
+                    border.width: 1
+                    Text {
+                        anchors.centerIn: parent
+                        text: "📄"
+                        font.pixelSize: 13
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: songDbDialog.open()
+                    }
+                }
             }
 
             // Wellenform-Display (Canvas — performant, kein Repeater-Ruckeln)
@@ -1289,6 +1311,14 @@ ApplicationWindow {
         defaultSuffix: "wav"
         nameFilters: ["WAV-Dateien (*.wav)"]
         onAccepted: sidBackend.exportWav(selectedFile)
+    }
+
+    // ── Songlength-DB-Dialog (Auto-Weiter: auf Datei zeigen) ──
+    FileDialog {
+        id: songDbDialog
+        title: "Songlength-Datei wählen (Songlengths.md5/.txt)"
+        nameFilters: ["Songlength-Dateien (*.md5 *.txt)", "Alle Dateien (*)"]
+        onAccepted: sidBackend.setSongLengthDb(selectedFile)
     }
 
     // ── Export-Fortschritt (Toast unten rechts) ──
